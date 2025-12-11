@@ -172,18 +172,31 @@ Education: ${p.education}
 Experience: ${p.experience} years`;
 }
 
-// ---------- Start WPPConnect ----------
-// IMPORTANT: put executablePath inside puppeteerOptions (WSL + snap chromium)
-wppconnect.create({
+// ---------- Chromium autodetect + Start WPPConnect ----------
+function findChromium() {
+  const candidates = [
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/snap/bin/chromium',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome'
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (e) {}
+  }
+  return null;
+}
+
+const chromiumPath = findChromium();
+console.log('Detected Chromium executable:', chromiumPath || 'none found');
+
+const wppConfig = {
   session: SESSION_NAME,
-
-  // WSL friendly: headless mode
   headless: true,
-
   browserWS: false,
-
   puppeteerOptions: {
-    executablePath: '/snap/bin/chromium',   // <- confirm this path exists in your WSL
     headless: true,
     args: [
       "--no-sandbox",
@@ -201,12 +214,19 @@ wppconnect.create({
       "--disable-features=VizDisplayCompositor"
     ]
   },
-
-  // prefer chrome-type browser
+  // prefer chrome type
   browser: 'chrome'
-})
-.then(client => start(client))
-.catch(err => console.error("Create client error", err));
+};
+
+if (chromiumPath) {
+  // ensure puppeteer uses the system chromium
+  wppConfig.executablePath = chromiumPath;
+  wppConfig.puppeteerOptions.executablePath = chromiumPath;
+}
+
+wppconnect.create(wppConfig)
+  .then(client => start(client))
+  .catch(err => console.error("Create client error", err));
 
 function start(client) {
   console.log("🚀 WhatsApp Immigration Bot is running...");
