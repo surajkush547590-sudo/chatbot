@@ -78,12 +78,12 @@ function evaluateEligibility(data) {
   let score = 0;
   if (data.age >= 18 && data.age <= 45) score += 2;
   if (data.education) {
-    const e = data.education.toLowerCase();
+    const e = String(data.education).toLowerCase();
     if (e.includes("master") || e.includes("bachelor") || e.includes("phd")) score += 2;
   }
-  if (data.experience >= 2) score += 2;
-  if (data.ielts >= 6) score += 2;
-  if (data.country && data.country.toLowerCase() !== "india") score += 1;
+  if (Number(data.experience) >= 2) score += 2;
+  if (Number(data.ielts) >= 6) score += 2;
+  if (data.country && String(data.country).toLowerCase() !== "india") score += 1;
 
   return score >= 7 ? { result: "High chance", score }
        : score >= 4 ? { result: "Possible", score }
@@ -109,7 +109,7 @@ function initPersonal(session) {
 }
 
 function validatePersonal(field, value) {
-  value = value.trim();
+  value = String(value || "").trim();
 
   if (field === "phone") {
     const d = value.replace(/\D/g, "");
@@ -173,15 +173,17 @@ Experience: ${p.experience} years`;
 }
 
 // ---------- Start WPPConnect ----------
-// NOTE: executablePath points to snap chromium binary for WSL.
-// We use puppeteerOptions to pass args that work well in WSL headless mode.
+// IMPORTANT: put executablePath inside puppeteerOptions (WSL + snap chromium)
 wppconnect.create({
   session: SESSION_NAME,
-  // run headless so it works on WSL without GUI
+
+  // WSL friendly: headless mode
   headless: true,
-  // explicit chromium path (snap) — this matches your system
-  executablePath: '/snap/bin/chromium',
+
+  browserWS: false,
+
   puppeteerOptions: {
+    executablePath: '/snap/bin/chromium',   // <- confirm this path exists in your WSL
     headless: true,
     args: [
       "--no-sandbox",
@@ -195,10 +197,13 @@ wppconnect.create({
       "--disable-renderer-backgrounding",
       "--single-process",
       "--no-zygote",
-      "--no-first-run"
+      "--no-first-run",
+      "--disable-features=VizDisplayCompositor"
     ]
   },
-  browserWS: false // ensure wppconnect doesn't attempt a remote ws by default
+
+  // prefer chrome-type browser
+  browser: 'chrome'
 })
 .then(client => start(client))
 .catch(err => console.error("Create client error", err));
@@ -283,4 +288,237 @@ function start(client) {
       }
 
       // ----- PERSONAL DETAILS FLOW FIRST -----
-      if (session.step === "collect_pe_
+      if (session.step === "collect_personal") {
+        const done = await runPersonalFlow(client, msg, session, sessions, text);
+        if (!done) return;
+
+        session.step = "service";
+        saveSessions(sessions);
+
+        await client.sendText(chatId, "👍 Personal details collected!\n\n" + personalSummary(session.personal));
+        await client.sendText(chatId, "Continuing your selected service...");
+      }
+
+      // ROUTE TO SERVICE FLOWS
+      if (session.step === "service") {
+        if (session.flow === "CANADA_PR") return handleCanadaPR(client, msg, session, sessions, text);
+        if (session.flow === "STUDENT_VISA") return handleStudentVisa(client, msg, session, sessions, text);
+        if (session.flow === "WORK_PERMIT") return handleWorkPermit(client, msg, session, sessions, text);
+        if (session.flow === "TOURIST_VISA") return handleTouristVisa(client, msg, session, sessions, text);
+        if (session.flow === "BUSINESS_VISA") return handleBusinessVisa(client, msg, session, sessions, text);
+        if (session.flow === "ELIGIBILITY") return handleEligibility(client, msg, session, sessions, text);
+        if (session.flow === "HANDOFF") return handleHandoff(client, msg, session, sessions, text);
+      }
+
+    } catch (e) {
+      console.error("onMessage error:", e);
+    }
+  });
+}
+
+// ---------------- SERVICE FLOWS ----------------
+async function handleCanadaPR(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "ask_eligibility";
+    return client.sendText(chatId, "Do you want an eligibility check? (yes/no)");
+  }
+
+  if (session.data.stage === "ask_eligibility") {
+    if (/yes/i.test(text)) {
+      session.data.stage = "ielts";
+      return client.sendText(chatId, "Send your IELTS score (or type No)");
+    } else {
+      session.data.stage = "message";
+      return client.sendText(chatId, "Any message for our Canada expert?");
+    }
+  }
+
+  if (session.data.stage === "ielts") {
+    session.data.ielts = /no/i.test(text) ? null : text;
+    await saveLeadAndNotify(client, chatId, session, "Canada PR");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! Our team will evaluate your profile.");
+  }
+
+  if (session.data.stage === "message") {
+    session.data.message = text;
+    await saveLeadAndNotify(client, chatId, session, "Canada PR");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! Our expert will contact you.");
+  }
+}
+
+// STUDENT VISA
+async function handleStudentVisa(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "country";
+    return client.sendText(chatId, "Which country do you want to study in?");
+  }
+  if (session.data.stage === "country") {
+    session.data.country = text;
+    session.data.stage = "course";
+    return client.sendText(chatId, "Which course (Bachelor/Master/Diploma)?");
+  }
+  if (session.data.stage === "course") {
+    session.data.course = text;
+    session.data.stage = "score";
+    return client.sendText(chatId, "Your IELTS/TOEFL score? (or type No)");
+  }
+  if (session.data.stage === "score") {
+    session.data.ielts = /no/i.test(text) ? null : text;
+    await saveLeadAndNotify(client, chatId, session, "Student Visa");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! Our counselor will contact you.");
+  }
+}
+
+// WORK PERMIT
+async function handleWorkPermit(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "country";
+    return client.sendText(chatId, "Which country?");
+  }
+  if (session.data.stage === "country") {
+    session.data.country = text;
+    session.data.stage = "profession";
+    return client.sendText(chatId, "Your profession?");
+  }
+  if (session.data.stage === "profession") {
+    session.data.profession = text;
+    await saveLeadAndNotify(client, chatId, session, "Work Permit");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! We will check opportunities.");
+  }
+}
+
+// TOURIST VISA
+async function handleTouristVisa(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "country";
+    return client.sendText(chatId, "Which country do you want to visit?");
+  }
+  if (session.data.stage === "country") {
+    session.data.country = text;
+    session.data.stage = "days";
+    return client.sendText(chatId, "How many days?");
+  }
+  if (session.data.stage === "days") {
+    session.data.days = text;
+    await saveLeadAndNotify(client, chatId, session, "Tourist Visa");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! We will share the process.");
+  }
+}
+
+// BUSINESS VISA
+async function handleBusinessVisa(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "idea";
+    return client.sendText(chatId, "Describe your business/startup idea:");
+  }
+  if (session.data.stage === "idea") {
+    session.data.idea = text;
+    session.data.stage = "investment";
+    return client.sendText(chatId, "Estimated investment/team size?");
+  }
+  if (session.data.stage === "investment") {
+    session.data.investment = text;
+    await saveLeadAndNotify(client, chatId, session, "Business Visa");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Thanks! Our business visa team will contact you.");
+  }
+}
+
+// ELIGIBILITY CHECK
+async function handleEligibility(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "age";
+    return client.sendText(chatId, "What is your age?");
+  }
+  if (session.data.stage === "age") {
+    session.data.age = Number(text);
+    session.data.stage = "edu";
+    return client.sendText(chatId, "Your highest education?");
+  }
+  if (session.data.stage === "edu") {
+    session.data.education = text;
+    session.data.stage = "exp";
+    return client.sendText(chatId, "Work experience (yrs)?");
+  }
+  if (session.data.stage === "exp") {
+    session.data.experience = Number(text);
+    session.data.stage = "ielts";
+    return client.sendText(chatId, "IELTS score? (or No)");
+  }
+  if (session.data.stage === "ielts") {
+    session.data.ielts = /no/i.test(text) ? null : Number(text);
+    session.data.stage = "country";
+    return client.sendText(chatId, "Which country?");
+  }
+  if (session.data.stage === "country") {
+    session.data.country = text;
+
+    const res = evaluateEligibility({ ...session.personal, ...session.data });
+
+    await saveLeadAndNotify(client, chatId, session, "Eligibility Check");
+    clearSession(session, sessions);
+
+    return client.sendText(chatId, `Eligibility Result: *${res.result}* (Score: ${res.score})`);
+  }
+}
+
+// HANDOFF
+async function handleHandoff(client, msg, session, sessions, text) {
+  const chatId = msg.from;
+
+  if (!session.data.stage) {
+    session.data.stage = "message";
+    return client.sendText(chatId, "Any message for our expert?");
+  }
+
+  if (session.data.stage === "message") {
+    session.data.message = text;
+    await saveLeadAndNotify(client, chatId, session, "Human Handoff");
+    clearSession(session, sessions);
+    return client.sendText(chatId, "Our expert has been notified and will contact you shortly.");
+  }
+}
+
+// ---- SAVE LEAD + ADMIN NOTIFY ----
+async function saveLeadAndNotify(client, chatId, session, flowName) {
+  const timestamp = new Date().toISOString();
+  const lead = { ...session.personal, ...session.data };
+  const name = lead.name || "Unknown";
+  const dataString = JSON.stringify(lead);
+
+  appendCsvRow([timestamp, chatId, name, flowName, dataString]);
+
+  const adminMsg = `🔔 New Lead (${flowName})
+Name: ${name}
+Chat: ${chatId}
+Data: ${dataString}
+Time: ${timestamp}`;
+
+  try { await client.sendText(ADMIN_NUMBER, adminMsg); }
+  catch (e) { console.error("Admin notify failed:", e); }
+}
+
+// ---- CLEAR SESSION ----
+function clearSession(session, sessions) {
+  session.flow = null;
+  session.step = null;
+  session.data = {};
+  saveSessions(sessions);
+}
